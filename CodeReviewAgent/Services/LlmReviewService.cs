@@ -1,18 +1,24 @@
+using System.ClientModel;
 using System.Text;
 using System.Text.Json;
 using CodeReviewAgent.Models;
+using OpenAI;
 using OpenAI.Chat;
 
 namespace CodeReviewAgent.Services;
 
 /// <summary>
-/// Sends diff data and rules to OpenAI for code review.
+/// Sends diff data and rules to GitHub Copilot (via GitHub Models) for code review.
 /// Handles chunking of large diffs and aggregation of results.
 /// </summary>
 public sealed class LlmReviewService
 {
-    // Conservative token budget – leaves room for system prompt, rules, and response
-    private const int MaxChunkChars = 12_000;
+    // GitHub Models free tier: 8K token limit per request.
+    // ~6K chars reserved for system prompt + rules ? ~2K for diff per chunk.
+    private const int MaxChunkChars = 4_000;
+    private const int MinChunkChars = 500;
+
+    private const string DefaultEndpoint = "https://models.github.ai/inference";
 
     private const string SystemPrompt =
         """
@@ -34,16 +40,25 @@ public sealed class LlmReviewService
         - Be precise with line numbers — use the exact numbers provided.
         """;
 
-    private readonly ChatClient _chatClient;
+    // GitHub Models free tier: 10 requests per 60 seconds. Stay under the limit.
+    private const int MaxRequestsPerMinute = 9;
+    private const int RetryMaxAttempts = 5;
+    private static readonly TimeSpan RateLimitWindow = TimeSpan.FromSeconds(60);
 
-    public LlmReviewService(string apiKey, string model = "gpt-4o")
+    private readonly ChatClient _chatClient;
+    private readonly Queue<DateTime> _requestTimestamps = new();
+
+    public LlmReviewService(string githubToken, string model = "openai/gpt-5.2", string? endpoint = null)
     {
-        _chatClient = new ChatClient(model, apiKey);
+        var credential = new ApiKeyCredential(githubToken);
+        var clientOptions = new OpenAIClientOptions { Endpoint = new Uri(endpoint ?? DefaultEndpoint) };
+        _chatClient = new ChatClient(model, credential, clientOptions);
     }
 
     /// <summary>
     /// Reviews all file diffs against the rules document.
     /// Automatically chunks large diffs to stay within token limits.
+    /// If a chunk still exceeds the limit (413), it is split further and retried.
     /// </summary>
     public async Task<List<ReviewResult>> ReviewAsync(List<FileDiff> diffs, string rulesContent)
     {
@@ -52,13 +67,46 @@ public sealed class LlmReviewService
 
         Console.WriteLine($"Sending {chunks.Count} chunk(s) to LLM for review...");
 
+        var pendingChunks = new Queue<(string Label, List<FileDiff> Chunk)>();
         for (int i = 0; i < chunks.Count; i++)
-        {
-            Console.WriteLine($"  Processing chunk {i + 1}/{chunks.Count}...");
+            pendingChunks.Enqueue(((i + 1).ToString(), chunks[i]));
 
-            var userMessage = BuildUserMessage(chunks[i], rulesContent);
-            var results = await SendToLlmAsync(userMessage);
-            allResults.AddRange(results);
+        var totalProcessed = 0;
+
+        while (pendingChunks.Count > 0)
+        {
+            var (label, chunk) = pendingChunks.Dequeue();
+            totalProcessed++;
+
+            await WaitForRateLimitAsync();
+            Console.WriteLine($"  Processing chunk {label} (attempt {totalProcessed})...");
+
+            var userMessage = BuildUserMessage(chunk, rulesContent);
+            var (results, wasTooLarge) = await SendToLlmWithSplitAsync(userMessage);
+
+            if (wasTooLarge)
+            {
+                // Split this chunk into smaller pieces and re-queue
+                var subChunks = SplitChunkFurther(chunk);
+                if (subChunks.Count > 1)
+                {
+                    Console.WriteLine($"  Chunk {label} too large. Splitting into {subChunks.Count} sub-chunks...");
+                    for (int s = 0; s < subChunks.Count; s++)
+                        pendingChunks.Enqueue(($"{label}.{s + 1}", subChunks[s]));
+                }
+                else
+                {
+                    // Single file with too many lines — split the file's lines into batches
+                    var lineBatches = SplitSingleFileDiff(chunk[0]);
+                    Console.WriteLine($"  Large single file. Splitting into {lineBatches.Count} line batches...");
+                    for (int s = 0; s < lineBatches.Count; s++)
+                        pendingChunks.Enqueue(($"{label}.{s + 1}", [lineBatches[s]]));
+                }
+            }
+            else
+            {
+                allResults.AddRange(results);
+            }
         }
 
         return allResults;
@@ -66,7 +114,7 @@ public sealed class LlmReviewService
 
     /// <summary>
     /// Groups file diffs into chunks that fit within the token budget.
-    /// Each chunk contains one or more complete file diffs.
+    /// Large single files are pre-split into line batches.
     /// </summary>
     private static List<List<FileDiff>> BuildChunks(List<FileDiff> diffs)
     {
@@ -79,7 +127,7 @@ public sealed class LlmReviewService
             var diffText = FormatFileDiff(diff);
             var diffSize = diffText.Length;
 
-            // If a single file exceeds the limit, it gets its own chunk
+            // If a single file exceeds the limit, split it into line batches
             if (diffSize > MaxChunkChars)
             {
                 if (currentChunk.Count > 0)
@@ -88,7 +136,11 @@ public sealed class LlmReviewService
                     currentChunk = [];
                     currentSize = 0;
                 }
-                chunks.Add([diff]);
+
+                var batches = SplitSingleFileDiff(diff);
+                foreach (var batch in batches)
+                    chunks.Add([batch]);
+
                 continue;
             }
 
@@ -107,6 +159,39 @@ public sealed class LlmReviewService
             chunks.Add(currentChunk);
 
         return chunks;
+    }
+
+    /// <summary>
+    /// Splits a single large FileDiff into multiple smaller FileDiffs by partitioning its lines.
+    /// </summary>
+    private static List<FileDiff> SplitSingleFileDiff(FileDiff diff)
+    {
+        var batches = new List<FileDiff>();
+        // Estimate ~60 chars per line on average
+        var linesPerBatch = Math.Max(10, MaxChunkChars / 60);
+
+        for (int i = 0; i < diff.Lines.Count; i += linesPerBatch)
+        {
+            var batchLines = diff.Lines.Skip(i).Take(linesPerBatch).ToList();
+            batches.Add(new FileDiff
+            {
+                FilePath = diff.FilePath,
+                Lines = batchLines
+            });
+        }
+
+        return batches;
+    }
+
+    /// <summary>
+    /// Splits a multi-file chunk into individual single-file chunks.
+    /// </summary>
+    private static List<List<FileDiff>> SplitChunkFurther(List<FileDiff> chunk)
+    {
+        if (chunk.Count <= 1)
+            return [chunk];
+
+        return chunk.Select(d => new List<FileDiff> { d }).ToList();
     }
 
     private static string BuildUserMessage(List<FileDiff> diffs, string rulesContent)
@@ -146,7 +231,11 @@ public sealed class LlmReviewService
         return sb.ToString();
     }
 
-    private async Task<List<ReviewResult>> SendToLlmAsync(string userMessage)
+    /// <summary>
+    /// Sends a request to the LLM with automatic retry on HTTP 429 (rate limit).
+    /// Returns (results, wasTooLarge): if wasTooLarge is true, the caller should split and retry.
+    /// </summary>
+    private async Task<(List<ReviewResult> Results, bool WasTooLarge)> SendToLlmWithSplitAsync(string userMessage)
     {
         var messages = new List<ChatMessage>
         {
@@ -160,27 +249,86 @@ public sealed class LlmReviewService
             TopP = 0.1f
         };
 
-        ChatCompletion completion = await _chatClient.CompleteChatAsync(messages, options);
+        var baseDelay = TimeSpan.FromSeconds(15);
 
-        var responseText = completion.Content[0].Text.Trim();
-
-        // Strip markdown code fences if the model wraps the response
-        responseText = StripMarkdownFences(responseText);
-
-        try
+        for (int attempt = 1; attempt <= RetryMaxAttempts; attempt++)
         {
-            var results = JsonSerializer.Deserialize<List<ReviewResult>>(responseText, new JsonSerializerOptions
+            try
             {
-                PropertyNameCaseInsensitive = true
-            });
+                ChatCompletion completion = await _chatClient.CompleteChatAsync(messages, options);
+                _requestTimestamps.Enqueue(DateTime.UtcNow);
 
-            return results ?? [];
+                var responseText = completion.Content[0].Text.Trim();
+                responseText = StripMarkdownFences(responseText);
+
+                try
+                {
+                    var results = JsonSerializer.Deserialize<List<ReviewResult>>(responseText, new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    });
+
+                    return (results ?? [], false);
+                }
+                catch (JsonException ex)
+                {
+                    Console.Error.WriteLine($"Warning: Failed to parse LLM response as JSON. {ex.Message}");
+                    Console.Error.WriteLine($"Raw response: {responseText[..Math.Min(500, responseText.Length)]}");
+                    return ([], false);
+                }
+            }
+            catch (ClientResultException ex) when (ex.Status == 413)
+            {
+                Console.WriteLine($"  Payload too large (413). Will split and retry.");
+                return ([], true);
+            }
+            catch (ClientResultException ex) when (ex.Status == 429)
+            {
+                var delay = baseDelay * Math.Pow(2, attempt - 1);
+                Console.WriteLine($"  Rate limited (429). Retry {attempt}/{RetryMaxAttempts} after {delay.TotalSeconds:F0}s...");
+
+                if (attempt == RetryMaxAttempts)
+                {
+                    Console.Error.WriteLine("  Max retries exceeded. Skipping this chunk.");
+                    return ([], false);
+                }
+
+                await Task.Delay(delay);
+            }
         }
-        catch (JsonException ex)
+
+        return ([], false);
+    }
+
+    /// <summary>
+    /// Proactively waits if we are approaching the rate limit to avoid 429 errors.
+    /// Tracks request timestamps within a sliding 60-second window.
+    /// </summary>
+    private async Task WaitForRateLimitAsync()
+    {
+        // Evict timestamps outside the sliding window
+        while (_requestTimestamps.Count > 0 && DateTime.UtcNow - _requestTimestamps.Peek() > RateLimitWindow)
         {
-            Console.Error.WriteLine($"Warning: Failed to parse LLM response as JSON. {ex.Message}");
-            Console.Error.WriteLine($"Raw response: {responseText[..Math.Min(500, responseText.Length)]}");
-            return [];
+            _requestTimestamps.Dequeue();
+        }
+
+        if (_requestTimestamps.Count >= MaxRequestsPerMinute)
+        {
+            var oldestTimestamp = _requestTimestamps.Peek();
+            var waitUntil = oldestTimestamp + RateLimitWindow;
+            var delay = waitUntil - DateTime.UtcNow;
+
+            if (delay > TimeSpan.Zero)
+            {
+                Console.WriteLine($"  Rate limit pacing: waiting {delay.TotalSeconds:F0}s before next request...");
+                await Task.Delay(delay);
+            }
+
+            // Evict again after waiting
+            while (_requestTimestamps.Count > 0 && DateTime.UtcNow - _requestTimestamps.Peek() > RateLimitWindow)
+            {
+                _requestTimestamps.Dequeue();
+            }
         }
     }
 

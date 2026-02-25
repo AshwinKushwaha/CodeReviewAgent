@@ -9,5 +9,4 @@ public sealed class CommandLineOptions
     public required string SourceBranch { get; init; }
     public required string TargetBranch { get; init; }
     public required string RulesPath { get; init; }
-    public required string OpenAiApiKey { get; init; }
 }

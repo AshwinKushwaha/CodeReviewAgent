@@ -9,8 +9,15 @@
 
   <ItemGroup>
     <PackageReference Include="LibGit2Sharp" Version="0.31.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="9.0.3" />
     <PackageReference Include="OpenAI" Version="2.2.0-beta.4" />
     <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>

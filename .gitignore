@@ -9,6 +9,11 @@
 *.user
 *.userosscache
 *.sln.docstates
+/ReviewReports
+**/ReviewReports/
+
+# Sensitive configuration – contains GitHub token
+**/appsettings.json
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
