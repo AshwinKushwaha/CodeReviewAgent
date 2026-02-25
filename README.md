@@ -81,7 +81,22 @@ First, **clone the target repository locally** (the agent works on local Git rep
 git clone https://github.com/your-org/your-repo "C:\Repos\your-repo"
 ```
 
-Then run from the `CodeReviewAgent` folder:
+### Option A: Interactive batch file (easiest)
+
+Double-click `run-review.bat` from the repo root — it will prompt you for all inputs:
+
+```
+=================================================
+  CodeReviewAgent - AI Code Review
+=================================================
+
+Enter local repository path: C:\Repos\your-repo
+Enter source branch (merge from): feature/my-feature
+Enter target branch (merge into): main
+Enter rules file path (press Enter for default ./rules.md):
+```
+
+### Option B: Command line (PowerShell)
 
 ```powershell
 cd CodeReviewAgent
@@ -91,6 +106,28 @@ dotnet run -- `
   --sourceBranch "feature/my-feature" `
   --targetBranch "main" `
   --rulesPath    ".\rules.md"
+```
+
+### Option C: Standalone EXE (no .NET SDK needed)
+
+Publish once, share the EXE with anyone:
+
+```cmd
+publish.bat
+```
+
+This creates `publish\win-x64\CodeReviewAgent.exe` — a single self-contained file.
+Run it directly or use the included `run-review.bat` in the publish folder:
+
+```cmd
+cd publish\win-x64
+run-review.bat
+```
+
+Or pass arguments directly:
+
+```cmd
+CodeReviewAgent.exe --repoPath "C:\Repos\your-repo" --sourceBranch "feature" --targetBranch "main" --rulesPath ".\rules.md"
 ```
 
 ### Arguments

@@ -12,6 +12,9 @@
 /ReviewReports
 **/ReviewReports/
 
+# Published standalone output
+publish/
+
 # Sensitive configuration – contains GitHub token
 **/appsettings.json
 # Template is safe to commit – no real secrets
