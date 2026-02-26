@@ -59,9 +59,11 @@ static async Task<int> RunReviewAsync(CommandLineOptions options)
 
         var endpoint = configuration["GitHubModelsEndpoint"] ?? "https://models.github.ai/inference";
         var model = configuration["Model"] ?? "openai/gpt-5.2";
+        var maxChunkChars = int.TryParse(configuration["MaxChunkChars"], out var parsed) ? parsed : 10_000;
 
         Console.WriteLine($"Using model: {model}");
         Console.WriteLine($"Endpoint:    {endpoint}");
+        Console.WriteLine($"Chunk size:  {maxChunkChars:N0} chars");
         Console.WriteLine();
 
         // 1. Load rules document
@@ -81,7 +83,29 @@ static async Task<int> RunReviewAsync(CommandLineOptions options)
         }
 
         // 3. Send diffs + rules to LLM for review
-        var llmService = new LlmReviewService(gitHubToken, model, endpoint);
+        var llmService = new LlmReviewService(gitHubToken, model, endpoint, maxChunkChars);
+
+        // Quick connectivity check before processing all chunks
+        Console.WriteLine("Testing API connectivity...");
+        var isReachable = await llmService.TestConnectivityAsync();
+        if (!isReachable)
+        {
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Current appsettings.json values:");
+            Console.Error.WriteLine($"  Endpoint : {endpoint}");
+            Console.Error.WriteLine($"  Model    : {model}");
+            Console.Error.WriteLine($"  Token    : {gitHubToken[..4]}...{gitHubToken[^4..]}");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Troubleshooting:");
+            Console.Error.WriteLine("  1. Is your internet connected?");
+            Console.Error.WriteLine("  2. Has your GitHub token expired? Regenerate at https://github.com/settings/tokens");
+            Console.Error.WriteLine("  3. Is the model name correct? Check https://github.com/marketplace/models");
+            Console.Error.WriteLine("  4. Is a VPN/proxy/firewall blocking the connection?");
+            return 2;
+        }
+        Console.WriteLine("API is reachable.");
+        Console.WriteLine();
+
         var results = await llmService.ReviewAsync(diffs, rulesContent);
 
         // 4. Output results as structured JSON

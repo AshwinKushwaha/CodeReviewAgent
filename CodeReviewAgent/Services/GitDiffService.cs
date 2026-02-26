@@ -13,7 +13,8 @@ public sealed class GitDiffService
 
     /// <summary>
     /// Gets file diffs between <paramref name="sourceBranch"/> and <paramref name="targetBranch"/>.
-    /// Returns only files with additions/modifications, each with line numbers mapped to the target branch.
+    /// Uses the merge-base (common ancestor) to match PR-style diffs,
+    /// showing only what the source branch introduces relative to where it diverged.
     /// </summary>
     public Task<List<FileDiff>> GetDiffsAsync(string repoPath, string sourceBranch, string targetBranch)
     {
@@ -21,13 +22,22 @@ public sealed class GitDiffService
 
         using var repo = new Repository(repoPath);
 
-        var source = ResolveBranch(repo, sourceBranch);
-        var target = ResolveBranch(repo, targetBranch);
+        var sourceCommit = ResolveBranch(repo, sourceBranch);
+        var targetCommit = ResolveBranch(repo, targetBranch);
 
-        Console.WriteLine($"Comparing {sourceBranch} ({source.Sha[..8]}) ? {targetBranch} ({target.Sha[..8]})");
+        // Find the merge-base (common ancestor) — this is how PRs compute diffs
+        var mergeBase = repo.ObjectDatabase.FindMergeBase(sourceCommit, targetCommit)
+            ?? throw new InvalidOperationException(
+                $"No common ancestor found between '{sourceBranch}' and '{targetBranch}'. " +
+                "Ensure both branches share commit history.");
 
-        // Diff from target to source to see what source introduces
-        var changes = repo.Diff.Compare<Patch>(target.Tree, source.Tree);
+        Console.WriteLine($"Source       : {sourceBranch} ({sourceCommit.Sha[..8]})");
+        Console.WriteLine($"Target       : {targetBranch} ({targetCommit.Sha[..8]})");
+        Console.WriteLine($"Merge-base   : {mergeBase.Sha[..8]}");
+        Console.WriteLine($"Diff strategy: merge-base ? source (PR-style)");
+
+        // Diff from merge-base to source — shows everything the source branch introduces
+        var changes = repo.Diff.Compare<Patch>(mergeBase.Tree, sourceCommit.Tree);
 
         foreach (var entry in changes)
         {

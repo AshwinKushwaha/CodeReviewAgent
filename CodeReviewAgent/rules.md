@@ -16,7 +16,9 @@ New CSS must be written mobile first.
 
 ### RULE-CSS-003: JS Hook Class Prefix
 Class names used as JavaScript hooks must be prefixed with `js-`, e.g. `js-submit-button`.
-- These classes must not be used for styling purposes.
+- These classes may also be combined with styling classes on the same element.
+- It is acceptable for a `js-` prefixed class to follow the component or page naming convention (e.g. `js-c-my-component__input`).
+- The `js-` prefix simply identifies the class as a JavaScript hook; it does not prohibit styling on the same class or element.
 
 ---
 
@@ -25,16 +27,16 @@ Class names used as JavaScript hooks must be prefixed with `js-`, e.g. `js-submi
 ### RULE-STR-001: String Concatenation
 String concatenation must use one of the following:
 - `StringBuilder`
-- `string.Format(...)`
+- `String.Format(...)`
 - Interpolated strings: `$"example - {dummy}"`
 - Raw string or verbatim literals where appropriate
 - Direct `+` operator concatenation on multiple strings is not allowed.
 
 ### RULE-STR-002: Empty String Comparison
-`string.Empty` must be used instead of `""` wherever possible.
+`String.Empty` must be used instead of `""` wherever possible.
 
 ### RULE-STR-003: String Equality Comparison
-String equality must use `string.Equals(...)` or `string.Compare(...)` with an explicit `StringComparison` culture specified.
+String equality must use `String.Equals(...)` or `String.Compare(...)` with an explicit `StringComparison` culture specified.
 - At minimum: `StringComparison.InvariantCultureIgnoreCase`
 - Direct `==` comparison on strings is not allowed.
 
@@ -54,6 +56,13 @@ Method and function names must accurately describe what they do.
 Unnecessary code logic must be removed.
 - Do not add null/empty checks for values that are guaranteed by the surrounding code to never be null or empty.
 - Remove dead code, unreachable branches, and redundant conditions.
+
+### RULE-CS-004: No Magic Numbers
+Magic numbers and number literals must not be used directly in code.
+- Define named constants (`const`), `static readonly` fields, or enums with meaningful names instead.
+- Exceptions: `0`, `1`, and `-1` are acceptable in obvious contexts (e.g. loop initialisation, index bounds, boolean-like checks).
+- String literals used more than once should also be extracted to named constants.
+- Example violation: `if (retryCount > 3)` ? fix: `const int MaxRetries = 3; if (retryCount > MaxRetries)`
 
 ---
 
