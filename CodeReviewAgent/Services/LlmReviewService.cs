@@ -34,7 +34,7 @@ public sealed class LlmReviewService
         If no violations are found, return an empty JSON array: []
 
         IMPORTANT:
-        - Review ONLY added/modified lines (marked with [ADDED]).
+        - Review ONLY added/modified lines (marked with [ADDED] or [MODIFIED]).
         - Context lines (marked with [CTX]) are for reference only — do NOT flag them.
         - Line numbers shown are from the target branch.
         - Be precise with line numbers — use the exact numbers provided.
@@ -213,7 +213,7 @@ public sealed class LlmReviewService
         sb.AppendLine(rulesContent);
         sb.AppendLine();
         sb.AppendLine("## CODE CHANGES TO REVIEW");
-        sb.AppendLine("Review ONLY lines marked [ADDED]. Lines marked [CTX] are context only.");
+        sb.AppendLine("Review ONLY lines marked [ADDED] or [MODIFIED]. Lines marked [CTX] are context only.");
         sb.AppendLine();
 
         foreach (var diff in diffs)
@@ -234,7 +234,12 @@ public sealed class LlmReviewService
 
         foreach (var line in diff.Lines)
         {
-            var marker = line.Type == DiffLineType.Added ? "[ADDED]" : "[CTX]";
+            var marker = line.Type switch
+            {
+                DiffLineType.Added => "[ADDED]",
+                DiffLineType.Modified => "[MODIFIED]",
+                _ => "[CTX]"
+            };
             sb.AppendLine($"  {marker} L{line.LineNumber}: {line.Content}");
         }
 

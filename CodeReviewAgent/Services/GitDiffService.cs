@@ -73,7 +73,8 @@ public sealed class GitDiffService
         // Parse the unified diff format manually to extract line numbers accurately
         var lines = patchText.Split('\n');
         int newLineNumber = 0;
-        var allParsedLines = new List<(int NewLineNum, string Content, bool IsAdded, bool IsContext)>();
+        int pendingDeletions = 0;
+        var allParsedLines = new List<(int NewLineNum, string Content, bool IsAdded, bool IsModified, bool IsContext)>();
 
         foreach (var rawLine in lines)
         {
@@ -85,6 +86,7 @@ public sealed class GitDiffService
                 {
                     newLineNumber = hunkInfo.Value.NewStart;
                 }
+                pendingDeletions = 0;
                 continue;
             }
 
@@ -93,33 +95,38 @@ public sealed class GitDiffService
 
             if (rawLine.StartsWith('+'))
             {
-                allParsedLines.Add((newLineNumber, rawLine[1..], IsAdded: true, IsContext: false));
+                bool isModified = pendingDeletions > 0;
+                if (isModified)
+                    pendingDeletions--;
+
+                allParsedLines.Add((newLineNumber, rawLine[1..], IsAdded: !isModified, IsModified: isModified, IsContext: false));
                 newLineNumber++;
             }
             else if (rawLine.StartsWith('-'))
             {
-                // Deleted lines from old file – skip them for line numbering
-                // but we don't add them to our diff output since we review only new content
+                // Track deletions to detect modifications (a '+' following '-' lines)
+                pendingDeletions++;
                 continue;
             }
             else
             {
-                // Context line (unchanged)
-                allParsedLines.Add((newLineNumber, rawLine.Length > 0 ? rawLine[1..] : rawLine, IsAdded: false, IsContext: true));
+                // Context line (unchanged) — reset pending deletions
+                pendingDeletions = 0;
+                allParsedLines.Add((newLineNumber, rawLine.Length > 0 ? rawLine[1..] : rawLine, IsAdded: false, IsModified: false, IsContext: true));
                 newLineNumber++;
             }
         }
 
-        // Now filter: keep added lines and their surrounding context
-        var addedIndices = new HashSet<int>();
+        // Now filter: keep added/modified lines and their surrounding context
+        var changedIndices = new HashSet<int>();
         for (int i = 0; i < allParsedLines.Count; i++)
         {
-            if (allParsedLines[i].IsAdded)
-                addedIndices.Add(i);
+            if (allParsedLines[i].IsAdded || allParsedLines[i].IsModified)
+                changedIndices.Add(i);
         }
 
         var includeIndices = new HashSet<int>();
-        foreach (var idx in addedIndices)
+        foreach (var idx in changedIndices)
         {
             for (int c = Math.Max(0, idx - ContextLines); c <= Math.Min(allParsedLines.Count - 1, idx + ContextLines); c++)
             {
@@ -129,12 +136,12 @@ public sealed class GitDiffService
 
         foreach (var idx in includeIndices.Order())
         {
-            var (lineNum, content, isAdded, _) = allParsedLines[idx];
+            var (lineNum, content, isAdded, isModified, _) = allParsedLines[idx];
             fileDiff.Lines.Add(new DiffLine
             {
                 LineNumber = lineNum,
                 Content = content,
-                Type = isAdded ? DiffLineType.Added : DiffLineType.Context
+                Type = isModified ? DiffLineType.Modified : isAdded ? DiffLineType.Added : DiffLineType.Context
             });
         }
 
