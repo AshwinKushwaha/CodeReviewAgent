@@ -24,7 +24,7 @@ public sealed class LlmReviewService
     private const string DefaultEndpoint = "https://models.github.ai/inference";
 
     private const string SystemPrompt =
-        """
+		"""
         You are a strict senior code reviewer. Only evaluate provided diff lines against the rules.
         You MUST return ONLY a valid JSON array of violation objects with no additional text.
         Each object must have these exact fields:
@@ -51,6 +51,8 @@ public sealed class LlmReviewService
         - Do NOT flag code that is already compliant with the rule.
         - Do NOT flag the same logical issue on the same line under multiple rules.
         - Every violation you return MUST have a non-empty suggestedFix.
+        - No repetition of rule text.
+        - Keep suggestion under 20 words
         - If after analysis you find zero real violations, return an empty array [].
         """;
 
@@ -61,7 +63,6 @@ public sealed class LlmReviewService
 
     private readonly ChatClient _chatClient;
     private readonly Queue<DateTime> _requestTimestamps = new();
-    private string? _rulesContent;
 
     public LlmReviewService(string githubToken, string model = "openai/gpt-5.2", string? endpoint = null, int maxChunkChars = DefaultMaxChunkChars)
     {
@@ -137,12 +138,12 @@ public sealed class LlmReviewService
     /// </summary>
     public async Task<List<ReviewResult>> ReviewAsync(List<FileDiff> diffs, string rulesContent)
     {
-        _rulesContent = rulesContent;
+        var ruleFilter = new RuleRelevanceFilter(rulesContent);
         var allResults = new List<ReviewResult>();
         var chunks = BuildChunks(diffs);
         var totalChunks = chunks.Count;
 
-        Console.WriteLine($"Sending {totalChunks} chunk(s) to LLM for review...");
+        Console.WriteLine($"Sending {totalChunks} chunk(s) to LLM for review ({ruleFilter.TotalRules} rules loaded)...");
 
         // Track (Label, Chunk, SplitDepth) to prevent infinite splitting
         var pendingChunks = new Queue<(string Label, List<FileDiff> Chunk, int Depth)>();
@@ -163,9 +164,12 @@ public sealed class LlmReviewService
             var chunkLines = chunk.Sum(c => c.Lines.Count);
             Console.WriteLine($"  [{totalProcessed}] Chunk {label} ({chunk.Count} file(s), {chunkLines} lines): {chunkFiles}");
 
+            var filteredRules = ruleFilter.GetFilteredRules(chunk, out var includedRules);
+            Console.WriteLine($"      Rules: {includedRules}/{ruleFilter.TotalRules} applicable");
+
             var chunkStopwatch = System.Diagnostics.Stopwatch.StartNew();
             var userMessage = BuildUserMessage(chunk);
-            var (results, wasTooLarge) = await SendToLlmWithSplitAsync(userMessage);
+            var (results, wasTooLarge) = await SendToLlmWithSplitAsync(userMessage, filteredRules);
             chunkStopwatch.Stop();
 
             if (wasTooLarge)
@@ -348,9 +352,11 @@ public sealed class LlmReviewService
     /// Sends a request to the LLM with automatic retry on HTTP 429 (rate limit).
     /// Returns (results, wasTooLarge): if wasTooLarge is true, the caller should split and retry.
     /// </summary>
-    private async Task<(List<ReviewResult> Results, bool WasTooLarge)> SendToLlmWithSplitAsync(string userMessage)
+    private async Task<(List<ReviewResult> Results, bool WasTooLarge)> SendToLlmWithSplitAsync(string userMessage, string filteredRules)
     {
-        var systemMessage = SystemPrompt + "\n\n## RULES DOCUMENT\n" + (_rulesContent ?? string.Empty);
+        var systemMessage = filteredRules.Length > 0
+            ? SystemPrompt + "\n\n" + filteredRules
+            : SystemPrompt;
 
         var messages = new List<ChatMessage>
         {
