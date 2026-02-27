@@ -13,10 +13,10 @@ namespace CodeReviewAgent.Services;
 /// </summary>
 public sealed class LlmReviewService
 {
-    // GitHub Models free tier: 8K token limit per request.
-    // ~6K chars reserved for system prompt + rules ? ~2K for diff per chunk.
-    private const int MaxChunkChars = 4_000;
+    private const int DefaultMaxChunkChars = 4_000;
     private const int MinChunkChars = 500;
+
+    private readonly int _maxChunkChars;
 
     private const string DefaultEndpoint = "https://models.github.ai/inference";
 
@@ -59,11 +59,12 @@ public sealed class LlmReviewService
     private readonly ChatClient _chatClient;
     private readonly Queue<DateTime> _requestTimestamps = new();
 
-    public LlmReviewService(string githubToken, string model = "openai/gpt-5.2", string? endpoint = null)
+    public LlmReviewService(string githubToken, string model = "openai/gpt-5.2", string? endpoint = null, int maxChunkChars = DefaultMaxChunkChars)
     {
         var credential = new ApiKeyCredential(githubToken);
         var clientOptions = new OpenAIClientOptions { Endpoint = new Uri(endpoint ?? DefaultEndpoint) };
         _chatClient = new ChatClient(model, credential, clientOptions);
+        _maxChunkChars = maxChunkChars > 0 ? maxChunkChars : DefaultMaxChunkChars;
     }
 
     /// <summary>
@@ -127,7 +128,7 @@ public sealed class LlmReviewService
     /// Groups file diffs into chunks that fit within the token budget.
     /// Large single files are pre-split into line batches.
     /// </summary>
-    private static List<List<FileDiff>> BuildChunks(List<FileDiff> diffs)
+    private List<List<FileDiff>> BuildChunks(List<FileDiff> diffs)
     {
         var chunks = new List<List<FileDiff>>();
         var currentChunk = new List<FileDiff>();
@@ -139,7 +140,7 @@ public sealed class LlmReviewService
             var diffSize = diffText.Length;
 
             // If a single file exceeds the limit, split it into line batches
-            if (diffSize > MaxChunkChars)
+            if (diffSize > _maxChunkChars)
             {
                 if (currentChunk.Count > 0)
                 {
@@ -155,7 +156,7 @@ public sealed class LlmReviewService
                 continue;
             }
 
-            if (currentSize + diffSize > MaxChunkChars && currentChunk.Count > 0)
+            if (currentSize + diffSize > _maxChunkChars && currentChunk.Count > 0)
             {
                 chunks.Add(currentChunk);
                 currentChunk = [];
@@ -175,11 +176,11 @@ public sealed class LlmReviewService
     /// <summary>
     /// Splits a single large FileDiff into multiple smaller FileDiffs by partitioning its lines.
     /// </summary>
-    private static List<FileDiff> SplitSingleFileDiff(FileDiff diff)
+    private List<FileDiff> SplitSingleFileDiff(FileDiff diff)
     {
         var batches = new List<FileDiff>();
         // Estimate ~60 chars per line on average
-        var linesPerBatch = Math.Max(10, MaxChunkChars / 60);
+        var linesPerBatch = Math.Max(10, _maxChunkChars / 60);
 
         for (int i = 0; i < diff.Lines.Count; i += linesPerBatch)
         {

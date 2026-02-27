@@ -59,6 +59,7 @@ static async Task<int> RunReviewAsync(CommandLineOptions options)
 
         var endpoint = configuration["GitHubModelsEndpoint"] ?? "https://models.github.ai/inference";
         var model = configuration["Model"] ?? "openai/gpt-5.2";
+        _ = int.TryParse(configuration["MaxChunkChars"], out var maxChunkChars);
 
         Console.WriteLine($"Using model: {model}");
         Console.WriteLine($"Endpoint:    {endpoint}");
@@ -81,7 +82,7 @@ static async Task<int> RunReviewAsync(CommandLineOptions options)
         }
 
         // 3. Send diffs + rules to LLM for review
-        var llmService = new LlmReviewService(gitHubToken, model, endpoint);
+        var llmService = new LlmReviewService(gitHubToken, model, endpoint, maxChunkChars);
         var results = await llmService.ReviewAsync(diffs, rulesContent);
 
         // 4. Output results as structured JSON
