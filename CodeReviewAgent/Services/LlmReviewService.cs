@@ -21,7 +21,7 @@ public sealed class LlmReviewService
     private const string DefaultEndpoint = "https://models.github.ai/inference";
 
     private const string SystemPrompt =
-        """
+		"""
         You are a strict senior code reviewer. Only evaluate provided diff lines against the rules.
         You MUST return ONLY a valid JSON array of violation objects with no additional text.
         Each object must have these exact fields:
@@ -38,6 +38,17 @@ public sealed class LlmReviewService
         - Context lines (marked with [CTX]) are for reference only — do NOT flag them.
         - Line numbers shown are from the target branch.
         - Be precise with line numbers — use the exact numbers provided.
+
+        STRICT FALSE-POSITIVE RULES — you MUST follow these:
+        - Only report a violation if the code CLEARLY and DEFINITIVELY breaks a rule.
+        - Do NOT report a violation if the rule does not apply to the data type or context.
+          For example: string comparison rules do NOT apply to integer, bool, enum, or object comparisons.
+        - Do NOT report speculative or "might be" violations. If you are unsure, do NOT include it.
+        - Do NOT report a violation and then say "this is not actually a violation" in the explanation.
+        - Do NOT flag code that is already compliant with the rule.
+        - Do NOT flag the same logical issue on the same line under multiple rules.
+        - Every violation you return MUST have a non-empty suggestedFix.
+        - If after analysis you find zero real violations, return an empty array [].
         """;
 
     // GitHub Models free tier: 10 requests per 60 seconds. Stay under the limit.
